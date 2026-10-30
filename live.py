@@ -10,6 +10,7 @@ que l'appli affiche (ni licence ni date de naissance).
 
   python3 live.py                     le vrai passage (GitHub Actions)
   python3 live.py --essai 2026-10-24  une seule lecture de ce week-end, affichée, rien d'envoyé
+  python3 live.py --depot 2026-10-24  une seule lecture de ce week-end, déposée au service (essai depuis GitHub)
 """
 import datetime, http.cookiejar, json, os, re, sys, time, urllib.request
 from zoneinfo import ZoneInfo
@@ -119,6 +120,11 @@ def week_end(jour):
 
 
 def main():
+    if '--depot' in sys.argv:
+        du, au = week_end(datetime.date.fromisoformat(sys.argv[sys.argv.index('--depot') + 1]))
+        matchs = lire(Rolskanet(), du, au, {})
+        deposer(du, au, matchs)
+        return print(f'{len(matchs)} matchs du week-end du {du} déposés au service.')
     if '--essai' in sys.argv:
         du, au = week_end(datetime.date.fromisoformat(sys.argv[sys.argv.index('--essai') + 1]))
         print(json.dumps(lire(Rolskanet(), du, au, {}), ensure_ascii=False, indent=1))

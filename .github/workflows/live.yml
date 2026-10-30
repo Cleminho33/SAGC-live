@@ -7,6 +7,11 @@ on:
     - cron: '0,30 14-20 * * 6'
     - cron: '0 11-17 * * 0'
   workflow_dispatch:
+    inputs:
+      essai:
+        description: "Essai : la date d'un samedi passé (2026-10-24), lu une fois et déposé au service. Vide : le vrai passage"
+        required: false
+        default: ''
 concurrency:
   group: live
   cancel-in-progress: false
@@ -19,4 +24,5 @@ jobs:
       - name: Lire Rolskanet et déposer au service
         env:
           LIVE_KEY: ${{ secrets.LIVE_KEY }}
-        run: python3 live.py
+          ESSAI: ${{ inputs.essai }}
+        run: if [ -n "$ESSAI" ]; then python3 live.py --depot "$ESSAI"; else python3 live.py; fi
