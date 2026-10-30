@@ -1,0 +1,22 @@
+# Live journée de SAGC'TOUT : le samedi après-midi (et le dimanche), plusieurs départs pour qu'au moins un soit là à l'heure
+# (GitHub lance parfois les robots programmés en retard). Un seul passage à la fois : les suivants attendent, puis voient
+# que tout est fini et s'arrêtent tout de suite. Heures en UTC : 14h à 20h30 couvrent 15h-21h30 l'hiver, 16h-22h30 l'été.
+name: Live journée
+on:
+  schedule:
+    - cron: '0,30 14-20 * * 6'
+    - cron: '0 11-17 * * 0'
+  workflow_dispatch:
+concurrency:
+  group: live
+  cancel-in-progress: false
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lire Rolskanet et déposer au service
+        env:
+          LIVE_KEY: ${{ secrets.LIVE_KEY }}
+        run: python3 live.py
