@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Lire Rolskanet et déposer au service
         env:
           LIVE_KEY: ${{ secrets.LIVE_KEY }}
