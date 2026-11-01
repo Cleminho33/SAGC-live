@@ -19,7 +19,13 @@ RK = 'https://rolskanet.fr'
 SERVICE = os.environ.get('LIVE_SERVICE') or 'https://sagc-notifs.clement-mora11.workers.dev'  # LIVE_SERVICE : un service d'essai
 N2 = {'saison': 2027, 'competition_id': 1333, 'phase_id': 4298}  # saison 2026-27, Nationale 2, phase « Championnat de France N2 »
 PARIS = ZoneInfo('Europe/Paris')
-PAS = 15                                    # secondes entre deux lectures : le chrono s'arrête à chaque coup de sifflet (temps effectif)
+PAS = 20                                    # secondes entre deux lectures de la liste des matchs (scores)
+# Rolskanet coupe au-delà d'environ 600 appels par heure (31-10 : 7 appels toutes les 20 s, coupé de 20h56 à 21h15 puis de 21h46
+# à 22h15). Le détail d'un match (buteurs, chrono) n'est donc relu que si son score ou son état bouge, sinon au plus toutes les
+# 40 s pour notre match et toutes les 150 s pour les autres : environ 400 appels par heure, journée complète.
+FRAIS_NOUS, FRAIS_AUTRES = 40, 150
+NOUS = 'GAZINET'
+APRES_NOUS = datetime.timedelta(minutes=21)  # le service ouvre le vote 20 min après la fin de notre match : on dépose encore une fois après
 BATTEMENT = 60                              # au plus une minute sans dépôt, même si rien n'a bougé (l'appli voit que le robot est là)
 AVANT = datetime.timedelta(minutes=15)      # on commence un quart d'heure avant le premier coup d'envoi
 TROP_TOT = datetime.timedelta(minutes=80)   # plus tôt que ça, on laisse un départ suivant prendre le relais (6 h maxi par passage)
@@ -40,7 +46,10 @@ class Rolskanet:
     def post(self, chemin, corps):
         req = urllib.request.Request(RK + chemin, data=json.dumps(corps).encode(), headers={
             'X-CSRF-TOKEN': self.csrf, 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json'})
-        return json.loads(self.op.open(req, timeout=30).read())
+        d = json.loads(self.op.open(req, timeout=30).read())
+        if not isinstance(d, dict):  # ce que Rolskanet renvoie quand il nous coupe (31-10) : le dire en clair dans le journal
+            raise RuntimeError(f'Rolskanet ne donne pas de match ({str(d)[:120]}) : limite d\'appels probable')
+        return d
 
 
 def rencontres(rk, du, au):
@@ -78,8 +87,17 @@ def detail(rk, rid, dom_id):
             'periodes': {'n': int(per.get('nombre') or 2), 'duree': int(per.get('duree') or 25)}}
 
 
-def lire(rk, du, au, finis):
-    """Les matchs du week-end ; le détail d'un match terminé n'est lu qu'une fois (finis)."""
+def nous(m):
+    return NOUS in m['dom'] + ' ' + m['ext']
+
+
+def fini(m):
+    return m['etat'] == 'T' or bool(m.get('fin'))
+
+
+def lire(rk, du, au, vus):
+    """Les matchs du week-end. vus : par match, son dernier détail, le score et l'état d'alors, l'heure de la lecture.
+    Un match terminé n'est plus relu ; les autres, voir FRAIS_NOUS et FRAIS_AUTRES."""
     matchs = []
     for m in rencontres(rk, du, au):
         r, v = m.get('receveur') or {}, m.get('visiteur') or {}
@@ -88,14 +106,14 @@ def lire(rk, du, au, finis):
              'dom': r.get('libelle_court') or '', 'ext': v.get('libelle_court') or '', 'etat': m.get('etat'),
              'forfait': bool(m.get('forfait')), 'score': [sc.get(r.get('id')), sc.get(v.get('id'))]}
         if o['etat'] in ('E', 'T'):
-            if m['id'] not in finis:
+            avant, cle = vus.get(m['id']), [o['score'], o['etat']]
+            clos = avant and o['etat'] == 'T' and avant['d'].get('fin')
+            if not avant or avant['cle'] != cle or (not clos and time.time() - avant['t'] >= (FRAIS_NOUS if nous(o) else FRAIS_AUTRES)):
                 try:
-                    finis[m['id']] = detail(rk, m['id'], r.get('id'))
-                except Exception as e:  # un détail qui ne vient pas : le score s'affiche quand même
+                    vus[m['id']] = avant = {'d': detail(rk, m['id'], r.get('id')), 'cle': cle, 't': time.time()}
+                except Exception as e:  # un détail qui ne vient pas : le score s'affiche quand même, avec le détail d'avant
                     print(f'détail du match {m["id"]} : {e}')
-            o.update(finis.get(m['id']) or {})
-            if o['etat'] != 'T' or not o.get('fin'):
-                finis.pop(m['id'], None)  # pas fini : relu au prochain passage
+            o.update((avant or {}).get('d') or {})
         matchs.append(o)
     return matchs
 
@@ -147,19 +165,25 @@ def main():
     if maintenant < debut:
         print(f'Attente jusqu\'à {debut:%H:%M}.')
         time.sleep((debut - maintenant).total_seconds())
-    fin_max, finis, erreurs, dernier, depose = datetime.datetime.now(PARIS) + DUREE_MAX, {}, 0, None, 0.0
+    fin_max, vus, erreurs, dernier, depose, fin_nous = datetime.datetime.now(PARIS) + DUREE_MAX, {}, 0, None, 0.0, None
     ids = {m['id'] for m in aujourdhui}
     while datetime.datetime.now(PARIS) < fin_max:
         try:
-            matchs = lire(rk, du, au, finis)
+            matchs = lire(rk, du, au, vus)
             # un dépôt seulement si quelque chose a bougé (but, arrêt, reprise du chrono), ou une fois par minute : peu d'écritures pour le service
             if matchs != dernier or time.time() - depose >= BATTEMENT:
                 deposer(du, au, matchs)
                 dernier, depose = matchs, time.time()
             erreurs = 0
             jour = [m for m in matchs if m['id'] in ids]
+            if not fin_nous and any(nous(m) and fini(m) for m in jour):
+                fin_nous = datetime.datetime.now(PARIS)
             print(f'{datetime.datetime.now(PARIS):%H:%M:%S} ' + ' | '.join(f"{m['dom'][:12]} {m['score'][0]}-{m['score'][1]} {m['etat'] or '-'}" for m in jour))
             if all(m['etat'] == 'T' for m in jour):
+                if fin_nous and datetime.datetime.now(PARIS) < fin_nous + APRES_NOUS:
+                    print(f'Tous les matchs sont terminés ; dernier dépôt à {fin_nous + APRES_NOUS:%H:%M} pour ouvrir le vote.')
+                    time.sleep((fin_nous + APRES_NOUS - datetime.datetime.now(PARIS)).total_seconds())
+                    deposer(du, au, matchs)
                 return print('Tous les matchs du jour sont terminés.')
         except Exception as e:
             erreurs += 1
@@ -169,6 +193,7 @@ def main():
                     rk = Rolskanet()
                 except Exception as e2:
                     print(f'Nouvelle session ratée : {e2}')
+            time.sleep(60 - PAS)  # coupé par Rolskanet : chaque essai compte, on espace
         time.sleep(PAS)
     print('Durée maximale atteinte.')
 
