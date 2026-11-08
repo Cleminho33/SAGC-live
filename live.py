@@ -25,7 +25,7 @@ PAS = 20                                    # secondes entre deux lectures de la
 # 40 s pour notre match et toutes les 150 s pour les autres : environ 400 appels par heure, journée complète.
 FRAIS_NOUS, FRAIS_AUTRES = 40, 150
 NOUS = 'GAZINET'
-APRES_NOUS = datetime.timedelta(minutes=21)  # le service ouvre le vote 20 min après la fin de notre match : on dépose encore une fois après
+APRES_NOUS = datetime.timedelta(minutes=16)  # le service ouvre le vote 15 min après la fin de notre match (finNous) : on dépose encore une fois après
 BATTEMENT = 60                              # au plus une minute sans dépôt, même si rien n'a bougé (l'appli voit que le robot est là)
 AVANT = datetime.timedelta(minutes=15)      # on commence un quart d'heure avant le premier coup d'envoi
 TROP_TOT = datetime.timedelta(minutes=80)   # plus tôt que ça, on laisse un départ suivant prendre le relais (6 h maxi par passage)
@@ -125,9 +125,11 @@ def coup_d_envoi(m):
         return None
 
 
-def deposer(du, au, matchs):
+def deposer(du, au, matchs, fin_nous=None):
+    # fin_nous : l'heure où l'on a vu notre match fini ; le service ouvre le vote 15 min après (le 07-11, il la notait lui-même et la perdait)
     req = urllib.request.Request(SERVICE + '/live/robot', data=json.dumps({
-        'du': du.isoformat(), 'au': au.isoformat(), 'maj': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'matchs': matchs}).encode(),
+        'du': du.isoformat(), 'au': au.isoformat(), 'maj': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'matchs': matchs,
+        **({'finNous': fin_nous.isoformat()} if fin_nous else {})}).encode(),
         headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + os.environ['LIVE_KEY'], 'User-Agent': 'sagc-live'})
     urllib.request.urlopen(req, timeout=30).read()
 
@@ -170,20 +172,20 @@ def main():
     while datetime.datetime.now(PARIS) < fin_max:
         try:
             matchs = lire(rk, du, au, vus)
-            # un dépôt seulement si quelque chose a bougé (but, arrêt, reprise du chrono), ou une fois par minute : peu d'écritures pour le service
-            if matchs != dernier or time.time() - depose >= BATTEMENT:
-                deposer(du, au, matchs)
-                dernier, depose = matchs, time.time()
-            erreurs = 0
             jour = [m for m in matchs if m['id'] in ids]
             if not fin_nous and any(nous(m) and fini(m) for m in jour):
                 fin_nous = datetime.datetime.now(PARIS)
+            # un dépôt seulement si quelque chose a bougé (but, arrêt, reprise du chrono), ou une fois par minute : peu d'écritures pour le service
+            if matchs != dernier or time.time() - depose >= BATTEMENT:
+                deposer(du, au, matchs, fin_nous)
+                dernier, depose = matchs, time.time()
+            erreurs = 0
             print(f'{datetime.datetime.now(PARIS):%H:%M:%S} ' + ' | '.join(f"{m['dom'][:12]} {m['score'][0]}-{m['score'][1]} {m['etat'] or '-'}" for m in jour))
             if all(m['etat'] == 'T' for m in jour):
                 if fin_nous and datetime.datetime.now(PARIS) < fin_nous + APRES_NOUS:
                     print(f'Tous les matchs sont terminés ; dernier dépôt à {fin_nous + APRES_NOUS:%H:%M} pour ouvrir le vote.')
                     time.sleep((fin_nous + APRES_NOUS - datetime.datetime.now(PARIS)).total_seconds())
-                    deposer(du, au, matchs)
+                    deposer(du, au, matchs, fin_nous)
                 return print('Tous les matchs du jour sont terminés.')
         except Exception as e:
             erreurs += 1
