@@ -8,6 +8,8 @@ match (buteurs, chrono) dès que son score bouge, sinon toutes les 40 s pour le 
 coupe au-delà d'environ 600 appels par heure ; le robot en fait environ 400. Il dépose sa lecture au service de l'appli,
 que les téléphones relisent, avec l'heure où notre match s'est fini, et une dernière fois 16 min après (le service ouvre le vote 15 min après la fin).
 
+- La N1 Élite du même week-end est lue en plus, une fois par minute et sans le détail (scores seulement) : environ 60 appels de plus par heure.
+  Tant qu'un match de N1 est en cours, le robot continue après la fin de la N2
 - Plusieurs départs programmés l'après-midi (GitHub lance parfois ses robots en retard) ; un seul passage à la fois
 - Aucun secret dans ce dépôt : la clé du service est le secret `LIVE_KEY`
 - Rien d'autre n'est envoyé que ce que l'appli affiche (ni licence ni date de naissance)

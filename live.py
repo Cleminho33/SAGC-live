@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo
 RK = 'https://rolskanet.fr'
 SERVICE = os.environ.get('LIVE_SERVICE') or 'https://sagc-notifs.clement-mora11.workers.dev'  # LIVE_SERVICE : un service d'essai
 N2 = {'saison': 2027, 'competition_id': 1333, 'phase_id': 4298}  # saison 2026-27, Nationale 2, phase « Championnat de France N2 »
+N1 = {'saison': 2027, 'competition_id': 1331, 'phase_id': 4297}  # N1 Élite, qu'on suit de loin (12.11) : les scores seulement
+PAS_N1 = 60                                 # la liste N1 relue au plus une fois par minute : 60 appels de plus par heure, on reste loin des 600
 PARIS = ZoneInfo('Europe/Paris')
 PAS = 20                                    # secondes entre deux lectures de la liste des matchs (scores)
 # Rolskanet coupe au-delà d'environ 600 appels par heure (31-10 : 7 appels toutes les 20 s, coupé de 20h56 à 21h15 puis de 21h46
@@ -52,8 +54,8 @@ class Rolskanet:
         return d
 
 
-def rencontres(rk, du, au):
-    corps = {**N2, 'equipe_term': None, 'discipline_code': 'RH', 'order_by': 'date_debut',
+def rencontres(rk, du, au, compet=N2):
+    corps = {**compet, 'equipe_term': None, 'discipline_code': 'RH', 'order_by': 'date_debut',
              'dates': {'start_date': du.strftime('%d/%m/%Y'), 'end_date': au.strftime('%d/%m/%Y')}}
     tout = []
     for page in range(1, 6):  # pages de 20 matchs : un week-end en tient 6
@@ -118,6 +120,22 @@ def lire(rk, du, au, vus):
     return matchs
 
 
+def lire_n1(rk, du, au):
+    """La N1 Élite du week-end : scores et états, sans le détail (ni buteurs ni chrono). Une N1 illisible ne gêne jamais la N2."""
+    try:
+        out = []
+        for m in rencontres(rk, du, au, N1):
+            r, v = m.get('receveur') or {}, m.get('visiteur') or {}
+            sc = {s['equipe_id']: s['score'] for s in m.get('score') or []}
+            out.append({'id': m['id'], 'j': int(m['tour']), 'quand': (m.get('infosRencontre') or {}).get('date_rencontre') or '',
+                        'dom': r.get('libelle_court') or '', 'ext': v.get('libelle_court') or '', 'etat': m.get('etat'),
+                        'forfait': bool(m.get('forfait')), 'score': [sc.get(r.get('id')), sc.get(v.get('id'))]})
+        return out
+    except Exception as e:
+        print(f'N1 pas lue : {e}')
+        return None
+
+
 def coup_d_envoi(m):
     try:
         return datetime.datetime.strptime(m['quand'], '%d/%m/%Y %H:%M').replace(tzinfo=PARIS)
@@ -125,11 +143,11 @@ def coup_d_envoi(m):
         return None
 
 
-def deposer(du, au, matchs, fin_nous=None):
+def deposer(du, au, matchs, fin_nous=None, n1=None):
     # fin_nous : l'heure où l'on a vu notre match fini ; le service ouvre le vote 15 min après (le 07-11, il la notait lui-même et la perdait)
     req = urllib.request.Request(SERVICE + '/live/robot', data=json.dumps({
         'du': du.isoformat(), 'au': au.isoformat(), 'maj': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'matchs': matchs,
-        **({'finNous': fin_nous.isoformat()} if fin_nous else {})}).encode(),
+        **({'finNous': fin_nous.isoformat()} if fin_nous else {}), **({'n1': n1} if n1 else {})}).encode(),
         headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + os.environ['LIVE_KEY'], 'User-Agent': 'sagc-live'})
     urllib.request.urlopen(req, timeout=30).read()
 
@@ -142,12 +160,14 @@ def week_end(jour):
 def main():
     if '--depot' in sys.argv:
         du, au = week_end(datetime.date.fromisoformat(sys.argv[sys.argv.index('--depot') + 1]))
-        matchs = lire(Rolskanet(), du, au, {})
-        deposer(du, au, matchs)
-        return print(f'{len(matchs)} matchs du week-end du {du} déposés au service.')
+        rk = Rolskanet()
+        matchs, n1 = lire(rk, du, au, {}), lire_n1(rk, du, au)
+        deposer(du, au, matchs, n1=n1)
+        return print(f'{len(matchs)} matchs du week-end du {du} (et {len(n1 or [])} de N1) déposés au service.')
     if '--essai' in sys.argv:
         du, au = week_end(datetime.date.fromisoformat(sys.argv[sys.argv.index('--essai') + 1]))
-        print(json.dumps(lire(Rolskanet(), du, au, {}), ensure_ascii=False, indent=1))
+        rk = Rolskanet()
+        print(json.dumps({'n2': lire(rk, du, au, {}), 'n1': lire_n1(rk, du, au)}, ensure_ascii=False, indent=1))
         return
     maintenant = datetime.datetime.now(PARIS)
     du, au = week_end(maintenant.date())
@@ -159,7 +179,7 @@ def main():
     if not aujourdhui:
         return print(f'Pas de match de N2 le {maintenant.date()}.')
     if all(m['etat'] == 'T' for m in aujourdhui):
-        deposer(du, au, matchs)
+        deposer(du, au, matchs, n1=lire_n1(rk, du, au))
         return print('Tous les matchs du jour sont terminés : dernière lecture déposée.')
     debut = min(filter(None, map(coup_d_envoi, aujourdhui))) - AVANT
     if debut - maintenant > TROP_TOT:
@@ -168,24 +188,29 @@ def main():
         print(f'Attente jusqu\'à {debut:%H:%M}.')
         time.sleep((debut - maintenant).total_seconds())
     fin_max, vus, erreurs, dernier, depose, fin_nous = datetime.datetime.now(PARIS) + DUREE_MAX, {}, 0, None, 0.0, None
+    n1, n1_t = None, 0.0
     ids = {m['id'] for m in aujourdhui}
     while datetime.datetime.now(PARIS) < fin_max:
         try:
             matchs = lire(rk, du, au, vus)
+            if time.time() - n1_t >= PAS_N1:  # la N1 Élite, une fois par minute ; une lecture ratée garde la précédente
+                n1_t, lu = time.time(), lire_n1(rk, du, au)
+                n1 = lu if lu is not None else n1
             jour = [m for m in matchs if m['id'] in ids]
             if not fin_nous and any(nous(m) and fini(m) for m in jour):
                 fin_nous = datetime.datetime.now(PARIS)
             # un dépôt seulement si quelque chose a bougé (but, arrêt, reprise du chrono), ou une fois par minute : peu d'écritures pour le service
-            if matchs != dernier or time.time() - depose >= BATTEMENT:
-                deposer(du, au, matchs, fin_nous)
-                dernier, depose = matchs, time.time()
+            if [matchs, n1] != dernier or time.time() - depose >= BATTEMENT:
+                deposer(du, au, matchs, fin_nous, n1)
+                dernier, depose = [matchs, n1], time.time()
             erreurs = 0
             print(f'{datetime.datetime.now(PARIS):%H:%M:%S} ' + ' | '.join(f"{m['dom'][:12]} {m['score'][0]}-{m['score'][1]} {m['etat'] or '-'}" for m in jour))
-            if all(m['etat'] == 'T' for m in jour):
+            # la N1 joue encore : on la suit (les dépôts portent finNous, le vote s'ouvre quand même)
+            if all(m['etat'] == 'T' for m in jour) and not any(m['etat'] == 'E' for m in (n1 or [])):
                 if fin_nous and datetime.datetime.now(PARIS) < fin_nous + APRES_NOUS:
                     print(f'Tous les matchs sont terminés ; dernier dépôt à {fin_nous + APRES_NOUS:%H:%M} pour ouvrir le vote.')
                     time.sleep((fin_nous + APRES_NOUS - datetime.datetime.now(PARIS)).total_seconds())
-                    deposer(du, au, matchs, fin_nous)
+                    deposer(du, au, matchs, fin_nous, n1)
                 return print('Tous les matchs du jour sont terminés.')
         except Exception as e:
             erreurs += 1
